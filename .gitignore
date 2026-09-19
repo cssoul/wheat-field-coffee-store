@@ -30,3 +30,7 @@ logs/
 *.njsproj
 *.sln
 *.sw?
+
+# 工具产物
+.shots/
+.workbuddy/

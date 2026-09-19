@@ -1,322 +1,165 @@
 <script setup lang="ts">
 /**
- * VOXEL MINIATURE WHEATFIELD CAFE · DIGITAL TWIN
- *
- * 应用层只负责三件事：
- *   1. 给 3D 场景一块画布
- *   2. 把场景抛出来的性能/遥测数据喂给 HUD
- *   3. 提供"看模型"的操作：切视角、调风力、开关阴影
+ * App —— 页面骨架：3D 视口 + 状态 HUD + 资产信息卡 + 底部控制条。
+ * UI 全部浮在画布上，不破坏场景视觉。
  */
-import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
-import TwinHud from './components/TwinHud.vue'
-import { CafeTwinScene, type SceneStats } from './scenes/CafeTwinScene'
-import { PRESETS, type ViewPreset } from './systems/CameraRig'
+import { reactive, ref } from 'vue'
 
-const stage = ref<HTMLElement | null>(null)
-const twin = shallowRef<CafeTwinScene | null>(null)
-const ready = ref(false)
-const building = ref(true)
+import AssetInfoCard from './components/AssetInfoCard.vue'
+import StatusHUD from './components/StatusHUD.vue'
+import TwinViewport from './components/TwinViewport.vue'
+import type { WheatCafeTwin } from './three/WheatCafeTwin'
+import type { AssetInfo, TwinStats, ViewPreset } from './types/twin'
 
+const twin = ref<WheatCafeTwin | null>(null)
+const selected = ref<AssetInfo | null>(null)
 const wind = ref(1)
 const shadows = ref(true)
-const paused = ref(false)
-const hd = ref(true)
-const current = ref<ViewPreset>('reference')
 
-const stats = ref<SceneStats>({
+const stats = reactive<TwinStats>({
   fps: 0,
-  frameMs: 0,
   drawCalls: 0,
   triangles: 0,
-  voxels: 0,
-  plants: 0,
-  tufts: 0,
-  flowers: 0,
-  clouds: 0,
-  wind: 1,
+  wheatCount: 0,
   temperature: 0,
-  customers: 6,
-  machine: 'ACTIVE',
-  grinder: 'READY',
-  fridge: '4°C',
+  customers: 0,
+  coffeeCups: 128,
+  wind: 1,
 })
 
-const presetList = (Object.keys(PRESETS) as ViewPreset[]).map((k) => ({
-  key: k,
-  label: PRESETS[k].label,
-}))
+// 遥测缓慢漂移（温度/客流的"活"感）
+setInterval(() => {
+  stats.temperature += 0.07
+  stats.customers += 0.05
+}, 1000)
 
-let onResize: (() => void) | null = null
+function onReady(t: WheatCafeTwin): void {
+  twin.value = t
+  stats.wheatCount = t.wheatCount
+  t.onFrame = (s) => {
+    stats.fps = s.fps
+    stats.drawCalls = s.drawCalls
+    stats.triangles = s.triangles
+  }
+  t.onSelect = (info) => {
+    selected.value = info
+  }
+}
 
-onMounted(() => {
-  // 先让浏览器把加载层画出来，再做重的体素建模（否则首屏会白一下）
-  requestAnimationFrame(() => {
-    if (!stage.value) return
-    const s = new CafeTwinScene(stage.value)
-    s.onStats = (v) => {
-      stats.value = v
-    }
-    s.start()
-    twin.value = s
-    ready.value = true
-    building.value = false
-  })
+const presets: Array<{ key: ViewPreset; label: string }> = [
+  { key: 'reference', label: '参考图视角' },
+  { key: 'overview', label: '桌面俯瞰' },
+  { key: 'door', label: '门前特写' },
+  { key: 'window', label: '窗口吧台' },
+]
 
-  onResize = () => twin.value?.resize()
-  window.addEventListener('resize', onResize)
-})
-
-onBeforeUnmount(() => {
-  if (onResize) window.removeEventListener('resize', onResize)
-  twin.value?.dispose()
-  twin.value = null
-})
-
-function pickPreset(k: ViewPreset) {
-  current.value = k
+function pickPreset(k: ViewPreset): void {
   twin.value?.setPreset(k)
 }
 
-function onWind() {
+function setWind(): void {
   twin.value?.setWind(wind.value)
+  stats.wind = wind.value
 }
 
-function onShadows() {
-  twin.value?.setShadows(shadows.value)
-}
-
-function onPaused() {
-  twin.value?.setPaused(paused.value)
-}
-
-function onHd() {
-  twin.value?.setPixelRatio(hd.value ? 2 : 1)
+function closeCard(): void {
+  selected.value = null
+  twin.value?.clearSelect()
 }
 </script>
 
 <template>
-  <div class="stage" ref="stage" />
+  <div class="stage">
+    <TwinViewport @ready="onReady" />
+    <StatusHUD :stats="stats" />
+    <AssetInfoCard v-if="selected" :info="selected" @close="closeCard" />
 
-  <TwinHud v-if="ready" :stats="stats" :paused="paused" />
-
-  <!-- 右上角：模型说明 -->
-  <div v-if="ready" class="glass note">
-    <div class="note-title">矩形麦田咖啡馆 · 微缩复刻</div>
-    <p>
-      白砖墙 + 厚麦草屋顶的长方形单层咖啡屋，屋前木平台与白色遮阳伞，
-      四周被麦田包住。全场景几何体、材质均由代码生成，无任何外部模型与贴图。
-    </p>
-  </div>
-
-  <!-- 底部操作台 -->
-  <div v-if="ready" class="glass bar">
-    <div class="group">
-      <span class="label">视角</span>
-      <button
-        v-for="p in presetList"
-        :key="p.key"
-        class="btn"
-        :class="{ on: current === p.key }"
-        @click="pickPreset(p.key)"
-      >
-        {{ p.label }}
-      </button>
-    </div>
-
-    <span class="sep" />
-
-    <div class="group">
-      <label class="label" for="wind">风力</label>
-      <input
-        id="wind"
-        class="slider"
-        type="range"
-        min="0"
-        max="2.2"
-        step="0.05"
-        v-model.number="wind"
-        @input="onWind"
-      />
-      <span class="mono num">{{ wind.toFixed(2) }}</span>
-    </div>
-
-    <span class="sep" />
-
-    <div class="group">
-      <button class="btn" :class="{ on: shadows }" @click="shadows = !shadows; onShadows()">
-        软阴影
-      </button>
-      <button class="btn" :class="{ on: !paused }" @click="paused = !paused; onPaused()">
-        {{ paused ? '已暂停' : '动态' }}
-      </button>
-      <button class="btn" :class="{ on: hd }" @click="hd = !hd; onHd()">
-        {{ hd ? '高清' : '省电' }}
-      </button>
-    </div>
-  </div>
-
-  <!-- 加载层 -->
-  <div v-if="building" class="loading">
-    <div class="loading-inner">
-      <div class="spinner" />
-      <div class="loading-text">
-        正在砌砖、铺茅草、种麦子<span class="mono">…</span>
+    <div class="controls glass">
+      <div class="group">
+        <button
+          v-for="p in presets"
+          :key="p.key"
+          class="btn"
+          @click="pickPreset(p.key)"
+        >
+          {{ p.label }}
+        </button>
       </div>
-      <div class="loading-sub">GENERATING VOXEL GEOMETRY · NO EXTERNAL ASSETS</div>
+      <div class="group slider-group">
+        <span class="lbl">风力</span>
+        <input v-model.number="wind" type="range" min="0" max="3" step="0.1" @input="setWind" />
+        <span class="val mono">{{ wind.toFixed(1) }}</span>
+      </div>
     </div>
+
+    <div class="hint">拖拽旋转 · 滚轮缩放 · 点击设备查看数字孪生信息</div>
   </div>
 </template>
 
 <style scoped>
-.note {
+.stage {
+  position: fixed;
+  inset: 0;
+}
+
+.controls {
   position: absolute;
-  top: 16px;
-  right: 16px;
-  width: 240px;
-  padding: 11px 13px;
-  pointer-events: none;
-  user-select: none;
-}
-
-.note-title {
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  color: var(--hud-accent);
-  margin-bottom: 5px;
-}
-
-.note p {
-  margin: 0;
-  font-size: 10.5px;
-  line-height: 1.62;
-  color: var(--hud-ink-dim);
-}
-
-.bar {
-  position: absolute;
-  left: 50%;
   bottom: 18px;
+  left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 14px;
-  user-select: none;
-  white-space: nowrap;
+  gap: 22px;
+  padding: 10px 18px;
 }
 
 .group {
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-
-.label {
-  font-size: 9.5px;
-  letter-spacing: 0.14em;
-  color: var(--hud-ink-dim);
-  font-weight: 700;
-}
-
-.sep {
-  width: 1px;
-  height: 18px;
-  background: rgba(var(--hud-line), 0.4);
+  gap: 8px;
 }
 
 .btn {
-  appearance: none;
-  border: 1px solid rgba(var(--hud-line), 0.42);
-  background: rgba(255, 255, 255, 0.5);
-  color: var(--hud-ink);
+  border: 1px solid rgba(31, 122, 82, 0.35);
+  background: rgba(255, 255, 255, 0.7);
+  color: #275a43;
+  font-size: 12px;
+  padding: 5px 12px;
   border-radius: 7px;
-  padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
   cursor: pointer;
-  transition: background 0.16s, border-color 0.16s, color 0.16s;
-  font-family: inherit;
+  transition: all 0.15s;
 }
-
 .btn:hover {
-  background: rgba(255, 255, 255, 0.86);
-  border-color: rgba(var(--hud-line), 0.8);
+  background: #1f7a52;
+  border-color: #1f7a52;
+  color: #fff;
 }
 
-.btn.on {
-  background: rgba(var(--hud-line), 0.2);
-  border-color: rgba(var(--hud-line), 0.92);
-  color: var(--hud-accent);
+.slider-group {
+  gap: 10px;
+}
+.lbl {
+  font-size: 12px;
+  color: #4b5a51;
+}
+.val {
+  font-size: 11px;
+  color: #1f7a52;
+  min-width: 26px;
+}
+input[type='range'] {
+  width: 110px;
+  accent-color: #1f7a52;
 }
 
-.slider {
-  appearance: none;
-  width: 104px;
-  height: 3px;
-  border-radius: 2px;
-  background: rgba(var(--hud-line), 0.34);
-  outline: none;
-  cursor: pointer;
-}
-
-.slider::-webkit-slider-thumb {
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: var(--hud-accent);
-  border: 2px solid #fff;
-  box-shadow: 0 1px 4px rgba(30, 60, 44, 0.35);
-  cursor: pointer;
-}
-
-.num {
-  font-size: 10.5px;
-  color: var(--hud-accent);
-  font-weight: 600;
-  width: 30px;
-}
-
-.loading {
+.hint {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(180deg, #6fb0d4 0%, #a9cbdd 58%, #dfe4dd 100%);
-}
-
-.loading-inner {
-  text-align: center;
-}
-
-.spinner {
-  width: 30px;
-  height: 30px;
-  margin: 0 auto 16px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.5);
-  border-top-color: #fff;
-  animation: spin 0.9s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.loading-text {
-  font-size: 13px;
-  color: #23414f;
+  bottom: 20px;
+  right: 22px;
+  font-size: 11px;
+  color: rgba(47, 58, 51, 0.55);
   letter-spacing: 0.05em;
-}
-
-.loading-sub {
-  margin-top: 7px;
-  font-size: 9px;
-  letter-spacing: 0.18em;
-  color: rgba(35, 65, 79, 0.6);
-  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  user-select: none;
+  pointer-events: none;
 }
 </style>
